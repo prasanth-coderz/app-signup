@@ -27,11 +27,18 @@ const userSchema = new mongoose.Schema({
   businessName: {
     type: String,
   },
+  revenue: {
+    type: Number, 
+    default: 0
+  },
+
   date: {
     type: Date,
     default: Date.now,
   },
 });
+
+
 
 const User = mongoose.model("User_model", userSchema);
 module.exports = User;

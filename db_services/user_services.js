@@ -16,7 +16,6 @@ exports.registerUser = async (userData) => {
   });
   return await newUser.save();
 };
-
 exports.loginUser = async (email, password) => {
   const user = await UserModel.findOne({ email });
   if (!user) {
@@ -73,10 +72,33 @@ exports.paginateRecords = async (req, res) => {
     const aggregationPipeline = [];
 
     const matchQuery = {};
+    aggregationPipeline.push({
+      $lookup: {
+        from: "business_models",
+        localField: "businessName",
+        foreignField: "business_name",
+        as: "businessDetails",
+      },
+    });
+
+    // Aggregation pipeline to calculate total revenue for each business
+    aggregationPipeline.push(
+      // Group by business name and calculate total revenue
+      {
+        $group: {
+          _id: "$businessName",
+          Total_Revenue: { $sum: "$revenue" },
+          users: { $push: "$$ROOT" },
+        },
+      },
+      // Unwind users to handle filtering and pagination
+      { $unwind: "$users" }
+    );
+
     if (search) {
       const fieldsToSearch = ["name", "phone", "role", "businessName"];
       matchQuery.$or = fieldsToSearch.map((field) => ({
-        [field]: { $regex: search, $options: "i" },
+        ["users." + field]: { $regex: search, $options: "i" },
       }));
     }
 
@@ -88,96 +110,46 @@ exports.paginateRecords = async (req, res) => {
     if (filters) {
       Object.entries(filters).forEach(([field, value]) => {
         if (value !== "") {
-          // Check if the filter field is from the user model or business model
-          if (field === "companyName") {
-            // If it's from the business model, use the field 'businessName'
-            matchQuery["businessName"] = {
+          if (field === "_id") {
+            matchQuery["_id"] = {
               $regex: value,
               $options: "i",
             };
-          } else if (field in Business.schema.paths) {
-            // Filter by field from the business model
-            aggregationPipeline.push({
-              $lookup: {
-                from: "business_models",
-                let: { businessName: "$businessName" },
-                pipeline: [
-                  {
-                    $match: {
-                      $expr: {
-                        $and: [
-                          { $eq: ["$business_name", "$$businessName"] },
-                          {
-                            $regexMatch: {
-                              input: `$${field}`,
-                              regex: value,
-                              options: "i",
-                            },},],},},},],
-                as: "businessDetails",
-              },
-            });
+          }
+          if (field === "Total_Revenue") {
+            matchQuery["Total_Revenue"] = parseInt(value);
           } else {
-            // Handle fields dynamically based on data type
             const fieldSchema = UserModel.schema.paths[field];
             if (fieldSchema && fieldSchema.instance === "String") {
-              matchQuery[field] = { $regex: value, $options: "i" };
+              matchQuery["users." + field] = { $regex: value, $options: "i" };
             } else if (fieldSchema && fieldSchema.instance === "Number") {
               matchQuery[field] = parseInt(value);
-            }}}});
+            }
+          }
+        }
+      });
     }
     if (Object.keys(matchQuery).length > 0) {
       aggregationPipeline.push({ $match: matchQuery });
     }
 
-    // SORTING FUNCTIONALITY
-    if (sort && sort.order) {
-      const sortOptions = {};
-      const sortField = sort.field ? sort.field : "name"; // Default sort field "name"
-      sortOptions[sortField] = sort.order === "asc" ? 1 : -1;
-      aggregationPipeline.push({ $sort: sortOptions });
-    }
 
     // Pagination stages
     aggregationPipeline.push({ $skip: skip });
     aggregationPipeline.push({ $limit: limitNumber });
 
-    // Lookup stage to join with the business collection
-    aggregationPipeline.push({
-      $lookup: {
-        from: "business_models",
-        localField: "businessName",
-        foreignField: "business_name",
-        as: "businessDetails",
-      },
-    });
+    // Execute aggregation pipeline
+    const result = await UserModel.aggregate(aggregationPipeline);
 
-    const user_records = await UserModel.aggregate(aggregationPipeline);
 
-    let totalCount = 0;
-    let warningMessage = "";
-
-    if (user_records.length === 0 && search) {
-      warningMessage = "No records found matching the search term.";
-    } else {
-      totalCount = await UserModel.aggregate([
-        { $match: matchQuery },
-        { $count: "count" },
-      ]);
-    }
-    const totalRecords = totalCount.length > 0 ? totalCount[0].count : 0;
-    const remainingRecords = Math.max(
-      totalRecords - pageNumber * limitNumber,
-      0
-    );
+    const user_records = result;
 
     res.json({
-      totalCount: totalRecords,
-      currentPage: warningMessage ? 0 : pageNumber,
-      totalPages: Math.ceil(totalRecords / limitNumber),
+      totalCount: user_records.length,
+      currentPage: pageNumber,
+      totalPages: Math.ceil(user_records.length / limitNumber),
       ...(message !== "" && { message }),
-      remainingRecords,
       user_records,
-      ...(warningMessage !== "" && { warningMessage }),
     });
   } catch (error) {
     res
